@@ -1,0 +1,11 @@
+name: sinker_workspace
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+
+workspace:
+  - packages/sinker_core
+  - packages/sinker_adb
+  - apps/sinker_cli
+  - apps/sinker_android

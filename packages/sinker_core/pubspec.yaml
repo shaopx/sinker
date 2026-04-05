@@ -1,0 +1,17 @@
+name: sinker_core
+description: Shared core library for Sinker - protocol, crypto, compression, transport.
+version: 0.1.0
+publish_to: none
+
+resolution: workspace
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  archive: ^4.0.2
+  crypto: ^3.0.6
+  pointycastle: ^3.9.1
+
+dev_dependencies:
+  test: ^1.25.0

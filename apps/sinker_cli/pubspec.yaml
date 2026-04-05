@@ -1,0 +1,24 @@
+name: sinker_cli
+description: Sinker CLI - send files to Android via ADB TCP tunnel.
+version: 0.1.0
+publish_to: none
+
+resolution: workspace
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  args: ^2.6.0
+  io: ^1.0.4
+  path: ^1.9.1
+  sinker_core:
+    path: ../../packages/sinker_core
+  sinker_adb:
+    path: ../../packages/sinker_adb
+
+dev_dependencies:
+  test: ^1.25.0
+
+executables:
+  sinker: sinker

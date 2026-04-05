@@ -1,0 +1,39 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+*.g.dart
+*.freezed.dart
+*.dill
+*.snapshot
+
+# Build outputs
+build/
+*.exe
+*.apk
+*.aab
+*.ipa
+*.dSYM/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Android
+apps/sinker_android/android/.gradle/
+apps/sinker_android/android/local.properties
+apps/sinker_android/android/captures/
+apps/sinker_android/android/key.properties
+
+# Temp
+*.tmp
+*.temp
