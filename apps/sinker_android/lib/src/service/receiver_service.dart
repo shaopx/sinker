@@ -101,9 +101,10 @@ class ReceiverService {
           final zipData = engine.decrypt(encData);
           await File(zipFilePath).writeAsBytes(zipData);
         } else if (metadata.encryption == 'aes-256-gcm') {
+          // Use platform-native AES for much faster decryption
           final encData = await File(tempFilePath).readAsBytes();
-          final engine = AesEngine(key: key);
-          final zipData = engine.decrypt(encData);
+          final engine = NativeAesEngine(key: key);
+          final zipData = await engine.decryptAsync(encData);
           await File(zipFilePath).writeAsBytes(zipData);
         } else {
           throw UnsupportedError('Unknown encryption: ${metadata.encryption}');

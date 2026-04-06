@@ -37,3 +37,4 @@ apps/sinker_android/android/key.properties
 # Temp
 *.tmp
 *.temp
+sinker_main.zip

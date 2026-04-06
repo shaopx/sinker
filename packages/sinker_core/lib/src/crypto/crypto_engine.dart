@@ -12,6 +12,10 @@ enum CryptoMode {
   /// AES-256-GCM. Strong encryption but slow in pure Dart (~2 MB/s).
   /// Use only for small sensitive files.
   aes,
+
+  /// AES-256-GCM via platform-native crypto (200-4000 MB/s).
+  /// Same wire format as [aes], compatible with either engine on the receiver.
+  nativeAes,
 }
 
 /// Common interface for all crypto engines.
@@ -61,6 +65,8 @@ class CryptoEngineFactory {
         return CryptoMode.xor;
       case 'aes-256-gcm':
         return CryptoMode.aes;
+      case 'aes-256-gcm-native':
+        return CryptoMode.nativeAes;
       default:
         throw ArgumentError('Unknown crypto mode: $modeName');
     }

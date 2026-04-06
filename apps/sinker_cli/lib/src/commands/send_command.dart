@@ -32,7 +32,7 @@ class SendCommand extends Command<void> {
       ..addOption('encrypt',
           abbr: 'e',
           help: 'Encryption mode.',
-          allowed: ['none', 'xor', 'aes'],
+          allowed: ['none', 'xor', 'aes', 'aes-native'],
           defaultsTo: 'none')
       ..addFlag('dry-run',
           help: 'Show what would be done without actually transferring.',
@@ -165,10 +165,20 @@ class SendCommand extends Command<void> {
           await _xorEncryptFile(tempZipPath, encPath, key);
           sendFilePath = encPath;
           encryptionLabel = 'xor';
+        } else if (encryptMode == 'aes-native') {
+          // AES via platform-native crypto — fast (200-4000 MB/s)
+          final zipBytes = await File(tempZipPath).readAsBytes();
+          final engine = NativeAesEngine(key: key);
+          final encBytes = await engine.encryptAsync(zipBytes);
+          final encPath = '$tempZipPath.enc';
+          tempFiles.add(encPath);
+          await File(encPath).writeAsBytes(encBytes);
+          sendFilePath = encPath;
+          encryptionLabel = 'aes-256-gcm';
         } else if (encryptMode == 'aes') {
-          // AES: slow, warn user
+          // AES: slow pure Dart, warn user
           print('  WARNING: AES is very slow in pure Dart (~2MB/s). '
-              'Consider --encrypt xor for large files.');
+              'Consider --encrypt aes-native for large files.');
           final zipBytes = await File(tempZipPath).readAsBytes();
           final engine = AesEngine(key: key);
           final encBytes = engine.encrypt(zipBytes);
@@ -246,11 +256,12 @@ class SendCommand extends Command<void> {
           filePath: sendFilePath,
           metadata: metadata,
           onProgress: (progress) {
-            stdout.write('\r  ${progress.toString()}');
+            stdout.write('\r  ${_renderProgressBar(progress)}');
           },
         );
 
-        stdout.write('\n');
+        // Clear the progress line and print final state
+        stdout.write('\r${' ' * 80}\r');
         totalStopwatch.stop();
 
         if (result.success) {
@@ -284,6 +295,22 @@ class SendCommand extends Command<void> {
         } catch (_) {}
       }
     }
+  }
+
+  /// Render a visual progress bar with speed and ETA.
+  ///
+  /// Example: `████████████░░░░░░░░  62.3%  125.4 MB / 201.2 MB  32.5 MB/s  ETA 2s`
+  String _renderProgressBar(TransferProgress p) {
+    const barWidth = 25;
+    final filled = (p.percentage * barWidth).round();
+    final empty = barWidth - filled;
+    final bar = '\x1B[32m${'█' * filled}\x1B[90m${'░' * empty}\x1B[0m';
+    final pct = '${(p.percentage * 100).toStringAsFixed(1)}%'.padLeft(6);
+    final sent = TransferProgress.formatSize(p.bytesSent);
+    final total = TransferProgress.formatSize(p.bytesTotal);
+    final speed = p.speedStr;
+    final eta = p.eta.inSeconds > 0 ? 'ETA ${p.eta.inSeconds}s' : '';
+    return '$bar $pct  $sent / $total  $speed  $eta';
   }
 
   /// XOR encrypt a file to another file (streaming, no full load).

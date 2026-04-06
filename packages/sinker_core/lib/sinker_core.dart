@@ -11,6 +11,7 @@ export 'src/protocol/handshake.dart';
 export 'src/crypto/crypto_engine.dart';
 export 'src/crypto/xor_engine.dart';
 export 'src/crypto/aes_engine.dart';
+export 'src/crypto/native_aes_engine.dart';
 export 'src/crypto/key_derivation.dart';
 
 // Compression
