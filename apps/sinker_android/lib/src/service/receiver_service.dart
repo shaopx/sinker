@@ -5,7 +5,7 @@ import 'dart:typed_data';
 import 'package:sinker_core/sinker_core.dart';
 
 /// Orchestrates the file receiving process:
-/// TCP listen → receive to temp file → decrypt (if needed) → decompress → save.
+/// TCP listen → receive to temp file → decrypt (if needed) → decompress (if needed) → save.
 class ReceiverService {
   final int port;
   final String password;
@@ -71,18 +71,17 @@ class ReceiverService {
     String tempFilePath,
   ) async {
     _log('INFO', 'Processing: ${metadata.originalName} '
-        '(encryption=${metadata.encryption})');
+        '(encryption=${metadata.encryption}, compression=${metadata.compression})');
     onStatusChanged?.call('Processing: ${metadata.originalName}');
 
     try {
-      String zipFilePath;
+      // ── Step 1: Decrypt if needed ──
+      String dataFilePath;
 
       if (metadata.encryption == 'none') {
-        // No decryption needed — temp file IS the zip
-        zipFilePath = tempFilePath;
+        dataFilePath = tempFilePath;
         _log('DEBUG', 'No decryption needed');
       } else {
-        // Decrypt to a new temp file
         _log('INFO', 'Decrypting (${metadata.encryption})...');
         onStatusChanged?.call('Decrypting...');
         final stopwatch = Stopwatch()..start();
@@ -93,19 +92,17 @@ class ReceiverService {
           salt: Uint8List.fromList(salt),
         );
 
-        zipFilePath = '$tempFilePath.zip';
+        final decryptedPath = '$tempFilePath.dec';
 
         if (metadata.encryption == 'xor') {
           final encData = await File(tempFilePath).readAsBytes();
           final engine = XorEngine(key: key);
-          final zipData = engine.decrypt(encData);
-          await File(zipFilePath).writeAsBytes(zipData);
+          final decData = engine.decrypt(encData);
+          await File(decryptedPath).writeAsBytes(decData);
         } else if (metadata.encryption == 'aes-256-gcm') {
-          // Use platform-native AES for much faster decryption
-          final encData = await File(tempFilePath).readAsBytes();
+          // File-based chunked decryption — no OOM for any file size
           final engine = NativeAesEngine(key: key);
-          final zipData = await engine.decryptAsync(encData);
-          await File(zipFilePath).writeAsBytes(zipData);
+          await engine.decryptFileAsync(tempFilePath, decryptedPath);
         } else {
           throw UnsupportedError('Unknown encryption: ${metadata.encryption}');
         }
@@ -115,35 +112,62 @@ class ReceiverService {
 
         // Clean up encrypted temp file
         try { await File(tempFilePath).delete(); } catch (_) {}
+
+        dataFilePath = decryptedPath;
       }
 
-      // Extract zip to target directory
-      _log('INFO', 'Extracting to $saveDir/${metadata.originalName} ...');
-      onStatusChanged?.call('Extracting...');
+      // ── Step 2: Extract or save ──
       final stopwatch = Stopwatch()..start();
-      final targetDir = '$saveDir/${metadata.originalName}';
 
-      if (metadata.originalType == 'file') {
-        // For single file, extract zip contents to saveDir directly
-        await ZipEngine.extractFile(zipFilePath, saveDir);
+      if (metadata.compression == 'zip') {
+        // Compressed — extract ZIP
+        _log('INFO', 'Extracting to $saveDir/${metadata.originalName} ...');
+        onStatusChanged?.call('Extracting...');
+
+        final targetDir = '$saveDir/${metadata.originalName}';
+
+        if (metadata.originalType == 'file') {
+          await ZipEngine.extractFile(dataFilePath, saveDir);
+        } else {
+          await ZipEngine.extractFile(dataFilePath, targetDir);
+        }
+
+        stopwatch.stop();
+        _log('INFO', 'Extracted in ${stopwatch.elapsed.inMilliseconds}ms');
       } else {
-        await ZipEngine.extractFile(zipFilePath, targetDir);
+        // Not compressed — save file directly
+        _log('INFO', 'Saving file to $saveDir/${metadata.originalName} ...');
+        onStatusChanged?.call('Saving...');
+
+        final targetPath = '$saveDir/${metadata.originalName}';
+        await Directory(saveDir).create(recursive: true);
+
+        // Move or copy the file to its final destination
+        try {
+          await File(dataFilePath).rename(targetPath);
+        } catch (_) {
+          // rename fails across filesystems, fall back to copy
+          await File(dataFilePath).copy(targetPath);
+          await File(dataFilePath).delete();
+        }
+
+        stopwatch.stop();
+        _log('INFO', 'Saved in ${stopwatch.elapsed.inMilliseconds}ms');
       }
 
-      stopwatch.stop();
-      _log('INFO', 'Extracted in ${stopwatch.elapsed.inMilliseconds}ms');
-
-      // Clean up zip temp file
+      // Clean up intermediate files
       try {
-        if (zipFilePath != tempFilePath) {
-          await File(zipFilePath).delete();
+        if (dataFilePath != tempFilePath) {
+          final f = File(dataFilePath);
+          if (await f.exists()) await f.delete();
         }
-        // Always try to clean temp
         final tempF = File(tempFilePath);
         if (await tempF.exists()) await tempF.delete();
       } catch (_) {}
 
-      final savedTo = metadata.originalType == 'file' ? saveDir : targetDir;
+      final savedTo = metadata.compression == 'zip' && metadata.originalType != 'file'
+          ? '$saveDir/${metadata.originalName}'
+          : saveDir;
       _log('INFO', 'Saved to: $savedTo');
       onStatusChanged?.call('Saved to: $savedTo');
       onTransferComplete?.call(metadata.originalName, true);
