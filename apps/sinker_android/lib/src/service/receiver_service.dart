@@ -36,6 +36,25 @@ class ReceiverService {
 
   void _log(String level, String msg) => onLog?.call(level, msg);
 
+  /// Current process RSS (resident set size) in MB, for memory diagnostics.
+  String _rss() {
+    try {
+      final mb = ProcessInfo.currentRss / 1024 / 1024;
+      return '${mb.toStringAsFixed(0)}MB';
+    } catch (_) {
+      return 'n/a';
+    }
+  }
+
+  String _fmtSize(int bytes) {
+    if (bytes < 1024) return '${bytes}B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)}KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / 1024 / 1024).toStringAsFixed(1)}MB';
+    }
+    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)}GB';
+  }
+
   /// Start the receiver service.
   Future<void> start() async {
     if (_running) return;
@@ -70,8 +89,14 @@ class ReceiverService {
     TransferMetadata metadata,
     String tempFilePath,
   ) async {
-    _log('INFO', 'Processing: ${metadata.originalName} '
-        '(encryption=${metadata.encryption}, compression=${metadata.compression})');
+    final tempSize = await File(tempFilePath).length();
+    _log('INFO', '═══ Processing: ${metadata.originalName} ═══');
+    _log('INFO', 'meta: encryption=${metadata.encryption}, '
+        'compression=${metadata.compression}, '
+        'origType=${metadata.originalType}, '
+        'declared=${_fmtSize(metadata.totalSize)}');
+    _log('INFO', 'tempFile=$tempFilePath actualSize=${_fmtSize(tempSize)} '
+        'rss=${_rss()}');
     onStatusChanged?.call('Processing: ${metadata.originalName}');
 
     try {
@@ -80,9 +105,9 @@ class ReceiverService {
 
       if (metadata.encryption == 'none') {
         dataFilePath = tempFilePath;
-        _log('DEBUG', 'No decryption needed');
+        _log('DEBUG', 'Step1: no decryption needed, rss=${_rss()}');
       } else {
-        _log('INFO', 'Decrypting (${metadata.encryption})...');
+        _log('INFO', 'Step1: decrypting (${metadata.encryption}) rss=${_rss()}');
         onStatusChanged?.call('Decrypting...');
         final stopwatch = Stopwatch()..start();
 
@@ -95,20 +120,27 @@ class ReceiverService {
         final decryptedPath = '$tempFilePath.dec';
 
         if (metadata.encryption == 'xor') {
+          _log('WARN', 'XOR loads entire file into memory! '
+              'size=${_fmtSize(tempSize)} rss=${_rss()}');
           final encData = await File(tempFilePath).readAsBytes();
+          _log('DEBUG', 'XOR: file loaded, rss=${_rss()}');
           final engine = XorEngine(key: key);
           final decData = engine.decrypt(encData);
           await File(decryptedPath).writeAsBytes(decData);
         } else if (metadata.encryption == 'aes-256-gcm') {
           // File-based chunked decryption — no OOM for any file size
+          _log('DEBUG', 'AES chunked decrypt starting, rss=${_rss()}');
           final engine = NativeAesEngine(key: key);
           await engine.decryptFileAsync(tempFilePath, decryptedPath);
+          _log('DEBUG', 'AES chunked decrypt done, rss=${_rss()}');
         } else {
           throw UnsupportedError('Unknown encryption: ${metadata.encryption}');
         }
 
         stopwatch.stop();
-        _log('INFO', 'Decrypted in ${stopwatch.elapsed.inMilliseconds}ms');
+        final decSize = await File(decryptedPath).length();
+        _log('INFO', 'Decrypted in ${stopwatch.elapsed.inMilliseconds}ms, '
+            'outSize=${_fmtSize(decSize)} rss=${_rss()}');
 
         // Clean up encrypted temp file
         try { await File(tempFilePath).delete(); } catch (_) {}
@@ -121,7 +153,8 @@ class ReceiverService {
 
       if (metadata.compression == 'zip') {
         // Compressed — extract ZIP
-        _log('INFO', 'Extracting to $saveDir/${metadata.originalName} ...');
+        _log('INFO', 'Step2: extracting ZIP to $saveDir/${metadata.originalName} '
+            'rss=${_rss()}');
         onStatusChanged?.call('Extracting...');
 
         final targetDir = '$saveDir/${metadata.originalName}';
@@ -133,26 +166,30 @@ class ReceiverService {
         }
 
         stopwatch.stop();
-        _log('INFO', 'Extracted in ${stopwatch.elapsed.inMilliseconds}ms');
+        _log('INFO', 'Extracted in ${stopwatch.elapsed.inMilliseconds}ms '
+            'rss=${_rss()}');
       } else {
         // Not compressed — save file directly
-        _log('INFO', 'Saving file to $saveDir/${metadata.originalName} ...');
+        final targetPath = '$saveDir/${metadata.originalName}';
+        _log('INFO', 'Step2: saving directly → $targetPath rss=${_rss()}');
         onStatusChanged?.call('Saving...');
 
-        final targetPath = '$saveDir/${metadata.originalName}';
         await Directory(saveDir).create(recursive: true);
 
         // Move or copy the file to its final destination
         try {
           await File(dataFilePath).rename(targetPath);
-        } catch (_) {
-          // rename fails across filesystems, fall back to copy
+          _log('DEBUG', 'rename succeeded (same filesystem)');
+        } catch (e) {
+          _log('WARN', 'rename failed ($e), falling back to copy');
           await File(dataFilePath).copy(targetPath);
           await File(dataFilePath).delete();
+          _log('DEBUG', 'copy fallback complete');
         }
 
         stopwatch.stop();
-        _log('INFO', 'Saved in ${stopwatch.elapsed.inMilliseconds}ms');
+        _log('INFO', 'Saved in ${stopwatch.elapsed.inMilliseconds}ms '
+            'rss=${_rss()}');
       }
 
       // Clean up intermediate files

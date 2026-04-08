@@ -248,8 +248,13 @@ class _BufferedSocketReader {
     );
   }
 
+  /// Long timeout — for multi-GB files, the receiver may need
+  /// many minutes to compute SHA-256 and flush to disk before
+  /// sending TRANSFER_COMPLETE.
+  static const Duration _readTimeout = Duration(seconds: 900);
+
   Future<Uint8List> readExact(int length) async {
-    final deadline = DateTime.now().add(const Duration(seconds: 60));
+    final deadline = DateTime.now().add(_readTimeout);
 
     while (_buffer.length < length) {
       if (_error != null) {

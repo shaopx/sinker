@@ -94,6 +94,10 @@ class _HomeScreenState extends State<HomeScreen> {
       _service!.onTransferComplete = (name, ok) {
         _state.addHistoryEntry(name, ok);
       };
+      _service!.onLog = (level, message) {
+        _state.addLog(level, message);
+      };
+      _state.addLog('INFO', 'Service starting on port $defaultPort, saveDir=$saveDir');
 
       _state.setListening(true);
       // Start listening in background
@@ -201,34 +205,132 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 24),
 
-                // Transfer history
+                // Transfer history (compact)
                 if (_state.history.isNotEmpty) ...[
                   Text(
                     'Recent Transfers',
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
-                  const SizedBox(height: 8),
-                  Expanded(
+                  const SizedBox(height: 4),
+                  SizedBox(
+                    height: 80,
                     child: ListView.builder(
                       itemCount: _state.history.length,
                       itemBuilder: (context, index) {
                         final entry = _state.history[index];
                         return ListTile(
+                          dense: true,
+                          visualDensity: VisualDensity.compact,
                           leading: Icon(
                             entry.success
                                 ? Icons.check_circle
                                 : Icons.error,
                             color: entry.success ? Colors.green : Colors.red,
+                            size: 18,
                           ),
-                          title: Text(entry.fileName),
+                          title: Text(
+                            entry.fileName,
+                            style: const TextStyle(fontSize: 13),
+                          ),
                           subtitle: Text(
                             '${entry.timestamp.hour}:${entry.timestamp.minute.toString().padLeft(2, '0')}',
+                            style: const TextStyle(fontSize: 11),
                           ),
                         );
                       },
                     ),
                   ),
+                  const SizedBox(height: 8),
                 ],
+
+                // Log panel — critical for diagnosing OOM / large file issues
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Logs (${_state.logs.length})',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    TextButton.icon(
+                      onPressed: _state.logs.isEmpty
+                          ? null
+                          : () => _state.clearLogs(),
+                      icon: const Icon(Icons.clear_all, size: 18),
+                      label: const Text('Clear'),
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Expanded(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.black87,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    padding: const EdgeInsets.all(8),
+                    child: _state.logs.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No logs yet. Start the receiver to see activity.',
+                              style: TextStyle(
+                                color: Colors.white54,
+                                fontSize: 12,
+                              ),
+                            ),
+                          )
+                        : ListView.builder(
+                            reverse: false,
+                            itemCount: _state.logs.length,
+                            itemBuilder: (context, index) {
+                              final log = _state.logs[index];
+                              final color = switch (log.level) {
+                                'ERROR' => Colors.redAccent,
+                                'WARN' => Colors.orangeAccent,
+                                'INFO' => Colors.lightGreenAccent,
+                                'DEBUG' => Colors.white70,
+                                _ => Colors.white,
+                              };
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 1,
+                                ),
+                                child: RichText(
+                                  text: TextSpan(
+                                    style: const TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 11,
+                                      color: Colors.white,
+                                    ),
+                                    children: [
+                                      TextSpan(
+                                        text: '${log.timeLabel} ',
+                                        style: const TextStyle(
+                                          color: Colors.white38,
+                                        ),
+                                      ),
+                                      TextSpan(
+                                        text:
+                                            '${log.level.padRight(5)} ',
+                                        style: TextStyle(
+                                          color: color,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      TextSpan(
+                                        text: log.message,
+                                        style: TextStyle(color: color),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ),
               ],
             ),
           );
