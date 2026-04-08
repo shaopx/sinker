@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' as crypto_pkg;
+
 import '../protocol/constants.dart';
 import '../protocol/header.dart';
 import '../protocol/message.dart';
@@ -84,6 +86,13 @@ class TcpSender {
       _log('INFO', 'Receiver ready, starting file stream transfer');
 
       // 5. Stream DATA_CHUNKs from file
+      // Compute SHA-256 incrementally as we read chunks — no separate
+      // pre-send disk pass needed. The hash is finalized right when
+      // the last chunk is sent, ready for TRANSFER_END.
+      final hashOutput = _SenderDigestSink();
+      final hashInput =
+          crypto_pkg.sha256.startChunkedConversion(hashOutput);
+
       raf = await File(filePath).open(mode: FileMode.read);
       final fileSize = await File(filePath).length();
       final chunkSize = metadata.chunkSize;
@@ -94,6 +103,9 @@ class TcpSender {
         final remaining = fileSize - offset;
         final readSize = remaining < chunkSize ? remaining : chunkSize;
         final chunk = await raf.read(readSize);
+
+        // Feed the chunk to the streaming hasher (no extra disk read).
+        hashInput.add(chunk);
 
         socket.add(Handshake.buildDataChunk(
           Uint8List.fromList(chunk),
@@ -121,9 +133,13 @@ class TcpSender {
 
       _log('INFO', 'All ${metadata.totalChunks} chunks sent');
 
-      // 6. Send TRANSFER_END
-      _log('DEBUG', 'Sending TRANSFER_END (sha256=${metadata.sha256.substring(0, 16)}...) ...');
-      socket.add(Handshake.buildTransferEnd(metadata.sha256));
+      // Finalize the streaming hash — O(1), no disk pass.
+      hashInput.close();
+      final computedSha256 = hashOutput.digest!.toString();
+
+      // 6. Send TRANSFER_END (with the incrementally-computed hash)
+      _log('DEBUG', 'Sending TRANSFER_END (sha256=${computedSha256.substring(0, 16)}...) ...');
+      socket.add(Handshake.buildTransferEnd(computedSha256));
       await socket.flush();
 
       // 7. Receive TRANSFER_COMPLETE
@@ -225,3 +241,15 @@ class TcpSender {
   }
 }
 
+/// Captures the single Digest emitted by `sha256.startChunkedConversion`.
+class _SenderDigestSink implements Sink<crypto_pkg.Digest> {
+  crypto_pkg.Digest? digest;
+
+  @override
+  void add(crypto_pkg.Digest data) {
+    digest = data;
+  }
+
+  @override
+  void close() {}
+}

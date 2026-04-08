@@ -230,10 +230,11 @@ class SendCommand extends Command<void> {
             '${TransferProgress.formatSize(encSpeed.toInt())}/s)');
       }
 
-      // Compute SHA-256 of the file to send (streaming)
-      log('DEBUG', 'Computing SHA-256 ...');
-      final sha256Hex = await KeyDerivation.sha256File(sendFilePath);
-      log('DEBUG', 'SHA-256: $sha256Hex');
+      // SHA-256 is computed incrementally inside TcpSender.sendFile()
+      // during chunk reads — no separate pre-pass over the file.
+      // The metadata.sha256 field is intentionally left empty; the
+      // receiver only consumes the hash from the TRANSFER_END message.
+      const sha256Hex = '';
 
       final sendFileSize = await File(sendFilePath).length();
 
