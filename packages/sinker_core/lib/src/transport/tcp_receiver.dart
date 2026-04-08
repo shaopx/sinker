@@ -2,11 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' as crypto_pkg;
+
 import '../protocol/constants.dart';
 import '../protocol/header.dart';
 import '../protocol/message.dart';
 import '../protocol/handshake.dart';
-import '../crypto/key_derivation.dart';
 import 'buffered_socket_reader.dart';
 import 'progress.dart';
 
@@ -142,6 +143,14 @@ class TcpReceiver {
       var bytesReceived = 0;
       var lastLogMs = 0;
 
+      // Incremental SHA-256: feed every chunk to a streaming hasher as
+      // it arrives, so we don't need a second 4GB read pass after the
+      // transfer to verify the checksum. Total cost: ~0 extra time
+      // (parallel with disk write & network).
+      final hashOutput = _DigestSink();
+      final hashInput =
+          crypto_pkg.sha256.startChunkedConversion(hashOutput);
+
       try {
         for (var i = 0; i < metadata.totalChunks; i++) {
           final chunkHeader = await _readHeader(reader);
@@ -150,6 +159,8 @@ class TcpReceiver {
 
           // Write to file, not memory!
           sink.add(chunkData);
+          // Feed the same bytes to the streaming hasher (no extra copy).
+          hashInput.add(chunkData);
           bytesReceived += chunkData.length;
 
           // Periodic disk flush so the OS can write through and free buffer
@@ -188,11 +199,17 @@ class TcpReceiver {
         await sink.close();
       }
 
+      // Finalize the streaming hash — this is O(1), no disk pass.
+      hashInput.close();
+      final actualSha256 = hashOutput.digest!.toString();
+
       _log('INFO',
           'All chunks received: ${TransferProgress.formatSize(bytesReceived)}, '
           'bufPeak=${_fmtSize(reader.peakBufferSize)}, '
           'pauseCount=${reader.pauseCount}, '
           'rss=${_rss()}');
+      _log('DEBUG', 'Incremental SHA-256 finalized: '
+          '${actualSha256.substring(0, 16)}...');
 
       // 6. Receive TRANSFER_END + verify checksum
       final endHeader = await _readHeader(reader);
@@ -202,15 +219,8 @@ class TcpReceiver {
         final endJson = json.decode(utf8.decode(endPayload)) as Map<String, dynamic>;
         final expectedSha256 = endJson['sha256'] as String;
 
-        // Compute SHA-256 of the temp file (streaming, no full load).
-        // For 4GB files this can take 30-90s on slower Android storage.
-        final shaWatch = Stopwatch()..start();
-        _log('INFO', 'Computing SHA-256 of received file '
-            '(${_fmtSize(bytesReceived)}) rss=${_rss()}');
-        final actualSha256 = await _fileSha256(tempFilePath);
-        shaWatch.stop();
-        _log('INFO', 'SHA-256 done in ${shaWatch.elapsed.inMilliseconds}ms '
-            'rss=${_rss()}');
+        // SHA-256 was computed incrementally during chunk reception
+        // (see hashInput above) — no second disk pass needed.
         _log('DEBUG', 'Expected: ${expectedSha256.substring(0, 16)}...');
         _log('DEBUG', 'Actual:   ${actualSha256.substring(0, 16)}...');
 
@@ -253,11 +263,6 @@ class TcpReceiver {
     }
   }
 
-  /// Compute SHA-256 of a file in streaming fashion (no full file load).
-  Future<String> _fileSha256(String filePath) async {
-    return KeyDerivation.sha256File(filePath);
-  }
-
   Future<PacketHeader> _readHeader(BufferedSocketReader reader) async {
     final bytes = await reader.readExact(headerSize);
     return PacketHeader.decode(bytes);
@@ -270,5 +275,19 @@ class TcpReceiver {
       );
     }
   }
+}
+
+/// Sink that captures the single Digest emitted by
+/// `sha256.startChunkedConversion(...)` so we can read it after closing.
+class _DigestSink implements Sink<crypto_pkg.Digest> {
+  crypto_pkg.Digest? digest;
+
+  @override
+  void add(crypto_pkg.Digest data) {
+    digest = data;
+  }
+
+  @override
+  void close() {}
 }
 
