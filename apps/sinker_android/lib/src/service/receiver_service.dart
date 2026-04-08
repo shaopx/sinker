@@ -148,51 +148,48 @@ class ReceiverService {
         dataFilePath = decryptedPath;
       }
 
-      // ── Step 2: Extract or save ──
+      // ── Step 2: Save the file directly to target ──
+      // We NEVER extract on Android — extraction loads file contents into
+      // memory and OOMs on multi-GB archives. The .zip is a STORED-mode
+      // (no compression) container; the user can open it with any file
+      // manager on Android, or it's the original file as-is.
       final stopwatch = Stopwatch()..start();
 
+      // Decide the final filename:
+      //   - file source + no compression → originalName
+      //   - directory source + zip       → originalName.zip
+      //   - file source + zip            → originalName.zip
+      String targetName;
       if (metadata.compression == 'zip') {
-        // Compressed — extract ZIP
-        _log('INFO', 'Step2: extracting ZIP to $saveDir/${metadata.originalName} '
-            'rss=${_rss()}');
-        onStatusChanged?.call('Extracting...');
-
-        final targetDir = '$saveDir/${metadata.originalName}';
-
-        if (metadata.originalType == 'file') {
-          await ZipEngine.extractFile(dataFilePath, saveDir);
-        } else {
-          await ZipEngine.extractFile(dataFilePath, targetDir);
-        }
-
-        stopwatch.stop();
-        _log('INFO', 'Extracted in ${stopwatch.elapsed.inMilliseconds}ms '
-            'rss=${_rss()}');
+        targetName = metadata.originalName.toLowerCase().endsWith('.zip')
+            ? metadata.originalName
+            : '${metadata.originalName}.zip';
       } else {
-        // Not compressed — save file directly
-        final targetPath = '$saveDir/${metadata.originalName}';
-        _log('INFO', 'Step2: saving directly → $targetPath rss=${_rss()}');
-        onStatusChanged?.call('Saving...');
+        targetName = metadata.originalName;
+      }
+      final targetPath = '$saveDir/$targetName';
 
-        await Directory(saveDir).create(recursive: true);
+      _log('INFO', 'Step2: saving to $targetPath rss=${_rss()}');
+      onStatusChanged?.call('Saving...');
 
-        // Move or copy the file to its final destination
-        try {
-          await File(dataFilePath).rename(targetPath);
-          _log('DEBUG', 'rename succeeded (same filesystem)');
-        } catch (e) {
-          _log('WARN', 'rename failed ($e), falling back to copy');
-          await File(dataFilePath).copy(targetPath);
-          await File(dataFilePath).delete();
-          _log('DEBUG', 'copy fallback complete');
-        }
+      await Directory(saveDir).create(recursive: true);
 
-        stopwatch.stop();
-        _log('INFO', 'Saved in ${stopwatch.elapsed.inMilliseconds}ms '
-            'rss=${_rss()}');
+      // Move or copy the file to its final destination (no extraction!)
+      try {
+        await File(dataFilePath).rename(targetPath);
+        _log('DEBUG', 'rename succeeded (same filesystem)');
+      } catch (e) {
+        _log('WARN', 'rename failed ($e), falling back to copy');
+        await File(dataFilePath).copy(targetPath);
+        await File(dataFilePath).delete();
+        _log('DEBUG', 'copy fallback complete');
       }
 
-      // Clean up intermediate files
+      stopwatch.stop();
+      _log('INFO', 'Saved in ${stopwatch.elapsed.inMilliseconds}ms '
+          'rss=${_rss()}');
+
+      // Clean up any leftover intermediate files
       try {
         if (dataFilePath != tempFilePath) {
           final f = File(dataFilePath);
@@ -202,9 +199,7 @@ class ReceiverService {
         if (await tempF.exists()) await tempF.delete();
       } catch (_) {}
 
-      final savedTo = metadata.compression == 'zip' && metadata.originalType != 'file'
-          ? '$saveDir/${metadata.originalName}'
-          : saveDir;
+      final savedTo = targetPath;
       _log('INFO', 'Saved to: $savedTo');
       onStatusChanged?.call('Saved to: $savedTo');
       onTransferComplete?.call(metadata.originalName, true);

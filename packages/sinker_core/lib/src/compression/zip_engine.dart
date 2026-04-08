@@ -1,98 +1,86 @@
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:archive/archive.dart';
+import 'package:archive/archive_io.dart';
+import 'package:path/path.dart' as p;
 
-/// ZIP compression and decompression engine.
+/// ZIP packaging engine — uses STORED mode (no compression).
+///
+/// Why STORED instead of DEFLATE:
+/// - Sinker transfers over local USB / ADB tunnel, not the internet,
+///   so saving a few percent of bytes via DEFLATE costs more CPU time
+///   than it saves transfer time.
+/// - DEFLATE is single-threaded ~30-80 MB/s; STORED is essentially
+///   disk-read speed (hundreds of MB/s).
+/// - STORED zips are still 100% valid zip files — any file manager
+///   on Android can open them.
+///
+/// Uses [ZipFileEncoder] + [InputFileStream] which stream both the
+/// input files and the output archive directly to/from disk, so
+/// memory usage stays small (a few MB) even for multi-GB sources.
 class ZipEngine {
-  /// Compress a file or directory to a zip file on disk.
+  /// Package a file or directory into a STORED-mode zip on disk.
   ///
-  /// This is the recommended method for large files/directories as it
-  /// avoids loading the entire archive into memory.
-  ///
-  /// Returns the output file path.
-  static Future<String> compressToFile(String sourcePath, String outputPath) async {
+  /// - Streams input files and output archive (no full in-memory build).
+  /// - Each entry is forced to `CompressionType.none` (STORED).
+  /// - Returns the output file path.
+  static Future<String> compressToFile(
+    String sourcePath,
+    String outputPath,
+  ) async {
     final entity = FileSystemEntity.typeSync(sourcePath);
-    final archive = Archive();
+    final encoder = ZipFileEncoder();
+    encoder.create(outputPath);
 
-    if (entity == FileSystemEntityType.directory) {
-      await _addDirectoryToArchive(archive, Directory(sourcePath), sourcePath);
-    } else if (entity == FileSystemEntityType.file) {
-      await _addFileToArchive(archive, File(sourcePath), File(sourcePath).parent.path);
-    } else {
-      throw ArgumentError('Path does not exist or is not a file/directory: $sourcePath');
+    try {
+      if (entity == FileSystemEntityType.directory) {
+        await _addDirectoryStored(encoder, Directory(sourcePath));
+      } else if (entity == FileSystemEntityType.file) {
+        _addFileStored(
+          encoder,
+          File(sourcePath),
+          p.basename(sourcePath),
+        );
+      } else {
+        throw ArgumentError(
+          'Path does not exist or is not a file/directory: $sourcePath',
+        );
+      }
+    } finally {
+      await encoder.close();
     }
-
-    final encoded = ZipEncoder().encode(archive);
-    await File(outputPath).writeAsBytes(encoded);
     return outputPath;
   }
 
-  /// Compress a file or directory to a zip archive in memory.
-  ///
-  /// WARNING: For large files (>100MB), use [compressToFile] instead
-  /// to avoid OutOfMemoryError.
-  static Future<Uint8List> compress(String path) async {
-    final entity = FileSystemEntity.typeSync(path);
-    final archive = Archive();
-
-    if (entity == FileSystemEntityType.directory) {
-      await _addDirectoryToArchive(archive, Directory(path), path);
-    } else if (entity == FileSystemEntityType.file) {
-      await _addFileToArchive(archive, File(path), File(path).parent.path);
-    } else {
-      throw ArgumentError('Path does not exist or is not a file/directory: $path');
-    }
-
-    final encoded = ZipEncoder().encode(archive);
-    return Uint8List.fromList(encoded);
-  }
-
-  /// Extract a zip file from disk to a target directory.
-  static Future<void> extractFile(String zipPath, String targetDir) async {
-    final bytes = await File(zipPath).readAsBytes();
-    await extract(bytes, targetDir);
-  }
-
-  /// Extract a zip archive from bytes to a target directory.
-  static Future<void> extract(Uint8List zipData, String targetDir) async {
-    final archive = ZipDecoder().decodeBytes(zipData);
-    final dir = Directory(targetDir);
-    if (!dir.existsSync()) {
-      await dir.create(recursive: true);
-    }
-
-    for (final file in archive) {
-      final filePath = '${targetDir}/${file.name}';
-      if (file.isFile) {
-        final outFile = File(filePath);
-        await outFile.parent.create(recursive: true);
-        await outFile.writeAsBytes(file.content as List<int>);
-      } else {
-        await Directory(filePath).create(recursive: true);
-      }
-    }
-  }
-
-  static Future<void> _addDirectoryToArchive(
-    Archive archive,
+  /// Walk a directory and add every file with STORED compression.
+  /// Streams each file via [InputFileStream] — never loads file contents
+  /// into memory.
+  static Future<void> _addDirectoryStored(
+    ZipFileEncoder encoder,
     Directory dir,
-    String basePath,
   ) async {
-    await for (final entity in dir.list(recursive: true)) {
+    await for (final entity in dir.list(recursive: true, followLinks: true)) {
       if (entity is File) {
-        await _addFileToArchive(archive, entity, basePath);
+        final relPath = p.posix.fromUri(
+          p.toUri(p.relative(entity.path, from: dir.path)),
+        );
+        _addFileStored(encoder, entity, relPath);
       }
     }
   }
 
-  static Future<void> _addFileToArchive(
-    Archive archive,
+  /// Add a single file as a STORED entry (no compression). Streams from
+  /// disk via [InputFileStream] so big files don't eat memory.
+  static void _addFileStored(
+    ZipFileEncoder encoder,
     File file,
-    String basePath,
-  ) async {
-    final relativePath = file.path.substring(basePath.length + 1);
-    final bytes = await file.readAsBytes();
-    archive.addFile(ArchiveFile(relativePath, bytes.length, bytes));
+    String entryName,
+  ) {
+    final inputStream = InputFileStream(file.path);
+    final archiveFile = ArchiveFile.stream(entryName, inputStream)
+      ..compression = CompressionType.none // ← force STORED
+      ..lastModTime =
+          file.lastModifiedSync().millisecondsSinceEpoch ~/ 1000
+      ..mode = file.statSync().mode;
+    encoder.addArchiveFile(archiveFile);
   }
 }

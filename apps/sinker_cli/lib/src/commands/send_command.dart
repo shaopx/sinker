@@ -160,19 +160,21 @@ class SendCommand extends Command<void> {
         compressionLabel = 'none';
         print('\nSkipping compression...');
       } else {
-        // Compress to temp ZIP
-        print('\nCompressing...');
+        // Package to temp ZIP using STORED mode (no compression).
+        // STORED is essentially disk-read speed; DEFLATE would cap us
+        // at ~50 MB/s and is pointless over a local USB tunnel.
+        print('\nPackaging (STORED, no compression)...');
         final tempZipPath = '${Directory.systemTemp.path}/sinker_${DateTime.now().millisecondsSinceEpoch}.zip';
         tempFiles.add(tempZipPath);
         await ZipEngine.compressToFile(sourcePath, tempZipPath);
         stepStopwatch.stop();
 
         final zipSize = await File(tempZipPath).length();
-        final ratio = fileMeta.size > 0
-            ? ((1 - zipSize / fileMeta.size) * 100).toStringAsFixed(1)
-            : '0.0';
-        print('  Compressed: ${TransferProgress.formatSize(zipSize)} '
-            '(${stepStopwatch.elapsed.inMilliseconds}ms, saved $ratio%)');
+        final overhead = fileMeta.size > 0
+            ? ((zipSize / fileMeta.size - 1) * 100).toStringAsFixed(2)
+            : '0.00';
+        print('  Packaged: ${TransferProgress.formatSize(zipSize)} '
+            '(${stepStopwatch.elapsed.inMilliseconds}ms, +$overhead% header overhead)');
         log('DEBUG', 'Temp zip: $tempZipPath ($zipSize bytes)');
 
         sendFilePath = tempZipPath;
