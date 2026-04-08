@@ -8,10 +8,12 @@ import '../protocol/header.dart';
 import '../protocol/message.dart';
 import '../protocol/handshake.dart';
 import '../model/transfer_result.dart';
+import 'buffered_socket_reader.dart';
 import 'progress.dart';
 
-/// Log callback type. If set, TcpSender will output detailed logs.
-typedef LogCallback = void Function(String level, String message);
+// Re-export so existing imports of `tcp_sender.dart show LogCallback` continue
+// to work without changes.
+export 'buffered_socket_reader.dart' show LogCallback;
 
 /// TCP sender - connects to Android receiver and sends data.
 ///
@@ -43,7 +45,7 @@ class TcpSender {
   }) async {
     final stopwatch = Stopwatch()..start();
     Socket? socket;
-    _BufferedSocketReader? reader;
+    BufferedSocketReader? reader;
     RandomAccessFile? raf;
 
     try {
@@ -53,7 +55,7 @@ class TcpSender {
           timeout: const Duration(seconds: 10));
       _log('INFO', 'Connected to ${socket.remoteAddress.address}:${socket.remotePort}');
 
-      reader = _BufferedSocketReader(socket, onLog: onLog);
+      reader = BufferedSocketReader(socket, onLog: onLog);
 
       // 1. Send HELLO
       _log('DEBUG', 'Sending HELLO ...');
@@ -192,7 +194,7 @@ class TcpSender {
 
   /// Read a complete message (header + payload) from buffered reader.
   Future<Uint8List> _expectMessage(
-    _BufferedSocketReader reader,
+    BufferedSocketReader reader,
     MessageType expected,
   ) async {
     final headerBytes = await reader.readExact(headerSize);
@@ -223,65 +225,3 @@ class TcpSender {
   }
 }
 
-/// Buffered reader for socket data.
-class _BufferedSocketReader {
-  final Socket _socket;
-  final LogCallback? onLog;
-
-  final _buffer = BytesBuilder();
-  late final StreamSubscription<List<int>> _subscription;
-  bool _done = false;
-  Object? _error;
-
-  _BufferedSocketReader(this._socket, {this.onLog}) {
-    _subscription = _socket.listen(
-      (data) => _buffer.add(data),
-      onError: (Object error, StackTrace stackTrace) {
-        onLog?.call('ERROR', 'Socket stream error: $error');
-        _error = error;
-        _done = true;
-      },
-      onDone: () {
-        onLog?.call('DEBUG', 'Socket stream closed by remote');
-        _done = true;
-      },
-    );
-  }
-
-  /// Long timeout — for multi-GB files, the receiver may need
-  /// many minutes to compute SHA-256 and flush to disk before
-  /// sending TRANSFER_COMPLETE.
-  static const Duration _readTimeout = Duration(seconds: 900);
-
-  Future<Uint8List> readExact(int length) async {
-    final deadline = DateTime.now().add(_readTimeout);
-
-    while (_buffer.length < length) {
-      if (_error != null) {
-        throw StateError('Socket error while reading: $_error');
-      }
-      if (_done && _buffer.length < length) {
-        throw StateError(
-          'Connection closed prematurely: got ${_buffer.length} bytes, need $length',
-        );
-      }
-      if (DateTime.now().isAfter(deadline)) {
-        throw TimeoutException(
-          'Timeout reading $length bytes (got ${_buffer.length})',
-        );
-      }
-      await Future.delayed(const Duration(milliseconds: 5));
-    }
-
-    final allBytes = _buffer.toBytes();
-    _buffer.clear();
-    if (allBytes.length > length) {
-      _buffer.add(allBytes.sublist(length));
-    }
-    return Uint8List.fromList(allBytes.sublist(0, length));
-  }
-
-  void dispose() {
-    _subscription.cancel();
-  }
-}

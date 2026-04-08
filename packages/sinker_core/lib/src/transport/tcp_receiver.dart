@@ -1,15 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import '../protocol/constants.dart';
 import '../protocol/header.dart';
 import '../protocol/message.dart';
 import '../protocol/handshake.dart';
 import '../crypto/key_derivation.dart';
+import 'buffered_socket_reader.dart';
 import 'progress.dart';
-import 'tcp_sender.dart' show LogCallback;
 
 /// Handler called when a transfer is received.
 /// [metadata] - transfer metadata
@@ -97,7 +96,7 @@ class TcpReceiver {
     TransferHandler onTransfer,
     ProgressCallback? onProgress,
   ) async {
-    final reader = _BufferedSocketReader(socket, onLog: onLog);
+    final reader = BufferedSocketReader(socket, onLog: onLog);
     String? tempFilePath;
     _log('INFO', 'Connection start, rss=${_rss()}');
 
@@ -259,7 +258,7 @@ class TcpReceiver {
     return KeyDerivation.sha256File(filePath);
   }
 
-  Future<PacketHeader> _readHeader(_BufferedSocketReader reader) async {
+  Future<PacketHeader> _readHeader(BufferedSocketReader reader) async {
     final bytes = await reader.readExact(headerSize);
     return PacketHeader.decode(bytes);
   }
@@ -273,109 +272,3 @@ class TcpReceiver {
   }
 }
 
-/// Buffered reader for socket data with backpressure.
-///
-/// CRITICAL: Without backpressure, the socket's `listen()` callback
-/// accumulates incoming data into [_buffer] as fast as the OS delivers it.
-/// For a 4GB file at >100MB/s the buffer can grow to multiple gigabytes
-/// before the consumer drains it, causing OOM on Android.
-///
-/// Backpressure strategy: when [_buffer] grows beyond [_highWaterMark],
-/// pause the subscription. When it drops below [_lowWaterMark], resume.
-/// Also tracks peak buffer size and pause count for diagnostics.
-class _BufferedSocketReader {
-  // Pause socket reads when buffer exceeds 16MB; resume below 4MB.
-  // Plenty of headroom for a single 1MB chunk + protocol overhead.
-  static const int _highWaterMark = 16 * 1024 * 1024;
-  static const int _lowWaterMark = 4 * 1024 * 1024;
-
-  // Long timeout — for 4GB+ files, the receiver may need minutes to
-  // hash and flush before reading the next message.
-  static const Duration _readTimeout = Duration(seconds: 900);
-
-  final Socket _socket;
-  final LogCallback? onLog;
-
-  final _buffer = BytesBuilder(copy: false);
-  late final StreamSubscription<List<int>> _subscription;
-  bool _done = false;
-  bool _paused = false;
-  Object? _error;
-
-  // Diagnostics
-  int peakBufferSize = 0;
-  int pauseCount = 0;
-
-  int get currentBufferSize => _buffer.length;
-
-  _BufferedSocketReader(this._socket, {this.onLog}) {
-    _subscription = _socket.listen(
-      (data) {
-        _buffer.add(data);
-        if (_buffer.length > peakBufferSize) {
-          peakBufferSize = _buffer.length;
-        }
-        // Apply backpressure: pause socket if buffer too large
-        if (!_paused && _buffer.length >= _highWaterMark) {
-          _paused = true;
-          pauseCount++;
-          _subscription.pause();
-          onLog?.call('DEBUG',
-              'Backpressure: pausing socket at '
-              '${(_buffer.length / 1024 / 1024).toStringAsFixed(1)}MB '
-              '(pauseCount=$pauseCount)');
-        }
-      },
-      onError: (Object error, StackTrace stackTrace) {
-        onLog?.call('ERROR', 'Socket stream error: $error');
-        _error = error;
-        _done = true;
-      },
-      onDone: () {
-        onLog?.call('DEBUG', 'Socket stream closed by remote');
-        _done = true;
-      },
-    );
-  }
-
-  Future<Uint8List> readExact(int length) async {
-    final deadline = DateTime.now().add(_readTimeout);
-
-    while (_buffer.length < length) {
-      if (_error != null) throw StateError('Socket error: $_error');
-      if (_done && _buffer.length < length) {
-        throw StateError('Connection closed: got ${_buffer.length}B, need $length');
-      }
-      if (DateTime.now().isAfter(deadline)) {
-        throw TimeoutException(
-            'Timeout reading $length bytes after ${_readTimeout.inSeconds}s '
-            '(got ${_buffer.length})');
-      }
-      await Future.delayed(const Duration(milliseconds: 5));
-    }
-
-    // Take exactly `length` bytes from the front of the buffer.
-    // BytesBuilder doesn't support partial take, so we extract all
-    // bytes and re-add the remainder. Length grows by at most one
-    // chunk's worth (~1MB) thanks to backpressure, so the copy is cheap.
-    final allBytes = _buffer.takeBytes(); // clears buffer
-    if (allBytes.length > length) {
-      _buffer.add(Uint8List.sublistView(allBytes, length));
-    }
-
-    // Resume socket if buffer drained below low water mark
-    if (_paused && _buffer.length <= _lowWaterMark) {
-      _paused = false;
-      _subscription.resume();
-      onLog?.call('DEBUG',
-          'Backpressure: resuming socket at '
-          '${(_buffer.length / 1024 / 1024).toStringAsFixed(1)}MB');
-    }
-
-    return Uint8List.sublistView(allBytes, 0, length);
-  }
-
-  void dispose() {
-    _subscription.cancel();
-  }
-}
